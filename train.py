@@ -94,7 +94,10 @@ def create_traffic_map(data, title="Traffic Congestion Map"):
     heat_data = [[row['latitude'], row['longitude'], row['congestion_index']] 
                  for idx, row in location_data.iterrows()]
     
-    HeatMap(heat_data, radius=15, gradient={0.4: 'blue', 0.65: 'yellow', 1: 'red'}).add_to(traffic_map)
+    # Add heat map layer with string keys for gradient
+    gradient = {str(0.4): 'blue', str(0.65): 'yellow', str(1): 'red'}
+    HeatMap(heat_data, radius=15, gradient=gradient).add_to(traffic_map)
+
     
     # Add title
     title_html = f'''
@@ -238,7 +241,9 @@ traffic_map.save("traffic_congestion_map.html")  # Saves as an interactive HTML 
 # Create time-based maps for different periods
 time_maps = create_time_based_maps(processed_data)
 for period, map_obj in time_maps.items():
-    map_obj.save(f"traffic_map_{period}.html")
+    safe_period = period.replace(":", "")  # Removes colons
+    map_obj.save(f"traffic_map_{safe_period}.html")
+
 
 # Plot time patterns for a specific intersection
 plot_location_time_patterns(processed_data, "Erindale Ave / Broadview Ave")
