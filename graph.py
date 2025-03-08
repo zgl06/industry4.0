@@ -1,94 +1,168 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 
-# Load the CSV file from dataset.csv instead of the tmc_ file
+# ---------------------------
+# 1. Load the CSV and compute congestion measures per category
+# ---------------------------
 df = pd.read_csv("dataset.csv")
-
 print(df.head())
 print(df.columns.str.strip().str.lower())
 
-# Define the transportation type categories in the desired order:
-# Vehicle, Bikes, Pedrestrains.
-# Adjust the keywords according to the column names in your dataset.
+# Define transportation type categories
 transportation_types = {
-    'Vehicle': ['vehicle', 'car', 'auto', 'passenger', 'truck', 'freight', 'commercial'],
+    'Vehicle': ['vehicle', 'car', 'auto', 'passenger', 'truck', 'freight', 'commercial','bus'],
     'Bikes': ['bike', 'bicycle'],
-    'Pedrestrains': ['pedrestrain', 'pedestrian', 'foot', 'walker', 'peds']
+    'Pedrestrains': ['pedrestrain', 'pedestrian', 'foot', 'walker','ped']
 }
 
-# Initialize a dictionary to store matching columns for each category
-transport_columns = {transport_type: [] for transport_type in transportation_types}
-
-# Find numeric columns that might relate to each transportation type.
-# Here, we check if the column name contains common volume/count indicators and one of the keywords.
+# Identify candidate columns and compute totals per category
+transport_columns = {t: [] for t in transportation_types}
 for col in df.columns:
     col_lower = col.lower()
-    if 'volume' in col_lower or 'count' in col_lower or any(keyword in col_lower for keywords in transportation_types.values() for keyword in keywords):
+    if ('volume' in col_lower or 'count' in col_lower or 
+        any(keyword in col_lower for keywords in transportation_types.values() for keyword in keywords)):
         for transport_type, keywords in transportation_types.items():
             if any(keyword in col_lower for keyword in keywords):
                 try:
-                    # Verify it's numeric
                     pd.to_numeric(df[col])
                     transport_columns[transport_type].append(col)
-                except:
+                except Exception as e:
                     print(f"Skipping non-numeric column: {col}")
 
-# Calculate total volume (or count) for each transportation type by summing the relevant columns.
-for transport_type, columns in transport_columns.items():
-    if columns:
-        print(f"Using these columns for {transport_type}: {columns}")
-        # Convert columns to numeric
-        for col in columns:
+for transport_type, cols in transport_columns.items():
+    if cols:
+        for col in cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        # Sum the columns for this transportation type
-        df[f'total_{transport_type.lower()}'] = df[columns].sum(axis=1)
+        df[f'total_{transport_type.lower()}'] = df[cols].sum(axis=1)
+        print(f"Using these columns for {transport_type}: {cols}")
     else:
-        # If no columns match, create random data for demonstration purposes.
         print(f"No suitable columns found for {transport_type}. Using random values for demonstration.")
         df[f'total_{transport_type.lower()}'] = np.random.randint(50, 500, size=len(df))
 
-# Create a figure with 3 subplots for the 3 categories in the specified order.
+# ---------------------------
+# 2. Process time-of-day from start_time and create 3‑hour bins
+# ---------------------------
+# Convert start_time (format: mm-dd-yyyyThh:mm:ss) to datetime
+df['time'] = pd.to_datetime(df['start_time'], errors='coerce')
+
+# Filter data to include only times between 07:30 and 18:00
+start_time_filter = pd.to_datetime("07:30").time()
+end_time_filter   = pd.to_datetime("18:00").time()
+df = df[(df['time'].dt.time >= start_time_filter) & (df['time'].dt.time <= end_time_filter)]
+
+# Function to bin times into 3‑hour intervals starting at 07:30.
+def get_time_bin(dt):
+    minutes = dt.hour * 60 + dt.minute
+    if minutes < 450 or minutes > 1080:
+        return None
+    # Each bin is 180 minutes (3 hours); bins start at 07:30 (450 minutes)
+    bin_index = (minutes - 450) // 180  
+    bin_start = 450 + bin_index * 180  # will be 450, 630, 810, or 990 minutes
+    hour = bin_start // 60
+    minute = bin_start % 60
+    return f"{hour:02d}:{minute:02d}"
+
+df['time_bin'] = df['time'].apply(get_time_bin)
+df = df.dropna(subset=['time_bin'])
+unique_bins = sorted(df['time_bin'].unique())
+print("Unique time bins:", unique_bins)
+
+# Assign a distinct base color for each time bin (using a qualitative colormap)
+base_cmap = plt.cm.get_cmap('tab10', len(unique_bins))
+bin_to_color = {t_bin: base_cmap(i) for i, t_bin in enumerate(unique_bins)}
+
+# ---------------------------
+# 3. Compute a shade for each record per category
+# ---------------------------
+# For each time bin and for each category, we blend white and the base color according
+# to the record's congestion value normalized within that time bin.
+# We'll create three new columns: 'color_vehicle', 'color_bikes', 'color_pedrestrains'
+
+def compute_shaded_color(series, base_color):
+    """Compute an array of shaded colors by blending white and base_color based on normalized values."""
+    vmin = series.min()
+    vmax = series.max()
+    # Avoid division by zero: if all values are equal, use norm=1.
+    def blend(val):
+        norm = 1 if vmax == vmin else (val - vmin) / (vmax - vmin)
+        # norm=0 -> white; norm=1 -> base_color
+        return norm * np.array(mcolors.to_rgb(base_color)) + (1 - norm) * np.array([1, 1, 1])
+    return series.apply(lambda x: blend(x))
+
+# For vehicles
+df['color_vehicle'] = None
+for t_bin in unique_bins:
+    mask = df['time_bin'] == t_bin
+    base_color = bin_to_color[t_bin]
+    df.loc[mask, 'color_vehicle'] = compute_shaded_color(df.loc[mask, 'total_vehicle'], base_color)
+
+# For bikes
+df['color_bikes'] = None
+for t_bin in unique_bins:
+    mask = df['time_bin'] == t_bin
+    base_color = bin_to_color[t_bin]
+    df.loc[mask, 'color_bikes'] = compute_shaded_color(df.loc[mask, 'total_bikes'], base_color)
+
+# For pedestrians
+df['color_pedrestrains'] = None
+for t_bin in unique_bins:
+    mask = df['time_bin'] == t_bin
+    base_color = bin_to_color[t_bin]
+    df.loc[mask, 'color_pedrestrains'] = compute_shaded_color(df.loc[mask, 'total_pedrestrains'], base_color)
+
+# ---------------------------
+# 4. Plot three heatmaps (one per category)
+# ---------------------------
+def scale_size(val, max_val):
+    return (val / max_val) * 100 + 20
+
 fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-fig.suptitle("Traffic/Usage Visualization by Category", fontsize=16)
+fig.suptitle("Congestion by Time Interval (3-hour bins) with Shades", fontsize=16)
 
-# Plot each transportation type as a scatter plot, using longitude and latitude for position.
-# The point size and color intensity reflect the computed totals.
-for transport_type, ax in zip(transportation_types.keys(), axes):
-    column_name = f'total_{transport_type.lower()}'
-    
-    # Create scatter plot
-    scatter = ax.scatter(
-        df["longitude"], 
-        df["latitude"],
-        c=df[column_name],  # Color by the computed total
-        s=(df[column_name] / max(df[column_name].max(), 1)) * 100 + 20,  # Scale point size by the total
-        cmap='YlOrRd',  # Colormap choice
-        alpha=0.7
-    )
-    
-    # Add a colorbar to each subplot
-    cbar = fig.colorbar(scatter, ax=ax)
-    cbar.set_label(f'{transport_type} Count')
-    
-    # Set plot labels and title
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.set_title(f"{transport_type} Data")
-    ax.grid(True)
-    
-    # Annotate the top 3 points (largest totals) on each plot
-    top_congested = df.nlargest(3, column_name)
-    for idx, row in top_congested.iterrows():
-        ax.annotate(
-            f"High: {int(row[column_name])}",
-            (row['longitude'], row['latitude']),
-            xytext=(10, 10),
-            textcoords='offset points',
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
-        )
+# Vehicle heatmap
+max_vehicle = df['total_vehicle'].max() if not df['total_vehicle'].empty else 1
+axes[0].scatter(df["longitude"], df["latitude"],
+                color=df['color_vehicle'].tolist(),
+                s=df['total_vehicle'].apply(lambda x: scale_size(x, max_vehicle)),
+                alpha=0.7)
+axes[0].set_xlabel("Longitude")
+axes[0].set_ylabel("Latitude")
+axes[0].set_title("Vehicle Congestion")
+axes[0].grid(True)
 
-plt.tight_layout()
-plt.subplots_adjust(top=0.85)  # Adjust for the super title
+# Bikes heatmap
+max_bikes = df['total_bikes'].max() if not df['total_bikes'].empty else 1
+axes[1].scatter(df["longitude"], df["latitude"],
+                color=df['color_bikes'].tolist(),
+                s=df['total_bikes'].apply(lambda x: scale_size(x, max_bikes)),
+                alpha=0.7)
+axes[1].set_xlabel("Longitude")
+axes[1].set_ylabel("Latitude")
+axes[1].set_title("Bike Congestion")
+axes[1].grid(True)
+
+# Pedestrians heatmap
+max_peds = df['total_pedrestrains'].max() if not df['total_pedrestrains'].empty else 1
+axes[2].scatter(df["longitude"], df["latitude"],
+                color=df['color_pedrestrains'].tolist(),
+                s=df['total_pedrestrains'].apply(lambda x: scale_size(x, max_peds)),
+                alpha=0.7)
+axes[2].set_xlabel("Longitude")
+axes[2].set_ylabel("Latitude")
+axes[2].set_title("Pedestrian Congestion")
+axes[2].grid(True)
+
+# Create a common legend with one patch per time interval using the base colors
+legend_patches = []
+for t_bin in unique_bins:
+    patch = mpatches.Patch(color=bin_to_color[t_bin], label=f"Time: {t_bin}")
+    legend_patches.append(patch)
+fig.legend(handles=legend_patches, title="Time Intervals", loc='upper center',
+           ncol=len(unique_bins), bbox_to_anchor=(0.5, 0.95))
+
+plt.tight_layout(rect=[0, 0, 1, 0.90])
 plt.show()
 print("run")
